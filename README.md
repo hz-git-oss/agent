@@ -5,18 +5,16 @@ request individually approved Bash commands. Each process handles one task.
 
 ## Requirements and installation
 
-Python 3.12 or newer is required. Install the package from the repository root:
+Python 3.12 or newer and [uv](https://docs.astral.sh/uv/) are required. From the
+repository root, create the managed environment and install the package with its
+development dependencies:
 
 ```powershell
-py -m pip install .
+uv sync
 ```
 
-For development, install the test extra in an isolated environment:
-
-```powershell
-py -m venv .venv
-.venv\Scripts\python -m pip install ".[test]"
-```
+uv creates and manages `.venv`; activation is not required. To install only runtime
+dependencies, use `uv sync --no-dev`.
 
 ## Configuration
 
@@ -73,13 +71,13 @@ themselves guarantee inference data-plane access.
 Use the default `agent.toml` in the current directory:
 
 ```powershell
-azure-bash-agent
+uv run azure-bash-agent
 ```
 
 Or select another configuration file:
 
 ```powershell
-azure-bash-agent --config path\to\agent.toml
+uv run azure-bash-agent --config path\to\agent.toml
 ```
 
 The configuration file must be inside a Git repository. The process discovers the
@@ -123,8 +121,8 @@ Windows uses `taskkill /T /F` when available. Cleanup is not hardened containmen
 ## Development checks
 
 ```powershell
-.venv\Scripts\python -m pytest
-.venv\Scripts\python -m ruff format --check .
-.venv\Scripts\python -m ruff check .
-.venv\Scripts\python -m mypy
+uv run pytest
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy
 ```

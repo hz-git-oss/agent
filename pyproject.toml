@@ -13,8 +13,8 @@ dependencies = [
     "openai>=1.106,<3",
 ]
 
-[project.optional-dependencies]
-test = [
+[dependency-groups]
+dev = [
     "mypy>=1.18,<2",
     "pytest>=9,<10",
     "ruff>=0.12,<1",
