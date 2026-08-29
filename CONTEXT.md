@@ -37,4 +37,5 @@ input to its history.
 
 Completed Operator Turns remain in process-local memory for later turns and are discarded
 when the Agent Run exits. Content-safe `INFO` events on stderr trace Agent Run, Operator
-Turn, and model-request lifecycles without recording conversation or command content.
+Turn, model-request, Bash Tool request, and command-execution lifecycles without recording
+conversation or command content.
