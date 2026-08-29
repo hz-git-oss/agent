@@ -117,10 +117,11 @@ for the current Agent Run. Requests use `store=False` and do not use
 service-side processing and retention remain governed by the policies of the selected
 Azure deployment.
 
-Deterministic `INFO` events on stderr trace Agent Run, Operator Turn, and model-request
-lifecycles using turn numbers, statuses, and counts. These operational traces omit prompts,
-model text, commands, command output, credentials, configuration values, random identifiers,
-and durations. Prompts and assistant responses remain on stdout.
+Deterministic `INFO` events on stderr trace Agent Run, Operator Turn, model-request,
+Bash Tool request, and command-execution lifecycles using turn numbers, statuses, and counts.
+These operational traces omit prompts, model text, commands, command output, credentials,
+configuration values, random identifiers, and durations. Prompts and assistant responses
+remain on stdout.
 
 Combined stdout and stderr are decoded as UTF-8 with replacement. Output over
 `bash.max_output_chars` is reduced to approximately equal head and tail portions with an

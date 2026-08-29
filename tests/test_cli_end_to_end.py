@@ -1,11 +1,15 @@
 import json
 import shutil
-from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
 
 import azure_bash_agent.cli as cli
 from azure_bash_agent.agent import ModelResponse
@@ -18,18 +22,23 @@ _FIRST_RESPONSE = f"Bash returned {_COMMAND_OUTPUT}."
 _RETAINED_RESPONSE = f"The retained Bash output was {_COMMAND_OUTPUT}."
 
 
-@dataclass(frozen=True)
-class _BashCall:
-    arguments: str
-    call_id: str = "scripted-call"
-    name: str = "bash"
-    type: str = "function_call"
+def _bash_call() -> ResponseFunctionToolCall:
+    return ResponseFunctionToolCall(
+        arguments=json.dumps({"command": _COMMAND}),
+        call_id="scripted-call",
+        name="bash",
+        type="function_call",
+    )
 
 
-@dataclass(frozen=True)
-class _ModelMessage:
-    text: str
-    type: str = "message"
+def _model_message(text: str, item_id: str) -> ResponseOutputMessage:
+    return ResponseOutputMessage(
+        id=item_id,
+        content=[ResponseOutputText(annotations=[], text=text, type="output_text")],
+        role="assistant",
+        status="completed",
+        type="message",
+    )
 
 
 class _ScriptedResponsesClient:
@@ -47,7 +56,7 @@ class _ScriptedResponsesClient:
 
         if request == _FIRST_REQUEST and tool_result is None:
             return ModelResponse(
-                output=[_BashCall(json.dumps({"command": _COMMAND}))],
+                output=[_bash_call()],
                 output_text="",
             )
         if request == _FIRST_REQUEST:
@@ -55,19 +64,20 @@ class _ScriptedResponsesClient:
             text = (
                 f"Bash returned {output}." if output is not None else "Bash result was unavailable."
             )
-            return ModelResponse(output=[_ModelMessage(text)], output_text=text)
+            return ModelResponse(output=[_model_message(text, "first-final")], output_text=text)
         if request == _FOLLOW_UP:
             retained = (
                 _has_operator_request(input, _FIRST_REQUEST)
-                and any(isinstance(item, _BashCall) for item in input)
+                and any(isinstance(item, ResponseFunctionToolCall) for item in input)
                 and _completed_command_output(tool_result) == _COMMAND_OUTPUT
                 and any(
-                    isinstance(item, _ModelMessage) and item.text == _FIRST_RESPONSE
+                    isinstance(item, ResponseOutputMessage)
+                    and _response_message_text(item) == _FIRST_RESPONSE
                     for item in input
                 )
             )
             text = _RETAINED_RESPONSE if retained else "The first Operator Turn was not retained."
-            return ModelResponse(output=[_ModelMessage(text)], output_text=text)
+            return ModelResponse(output=[_model_message(text, "follow-up-final")], output_text=text)
         raise AssertionError(f"unexpected operator request: {request!r}")
 
 
@@ -161,6 +171,13 @@ def _completed_command_output(tool_result: dict[str, Any] | None) -> str | None:
         return None
     output = result.get("output")
     return output if isinstance(output, str) else None
+
+
+def _response_message_text(message: ResponseOutputMessage) -> str | None:
+    for content in message.content:
+        if isinstance(content, ResponseOutputText):
+            return content.text
+    return None
 
 
 def _has_operator_request(history: list[object], request: str) -> bool:

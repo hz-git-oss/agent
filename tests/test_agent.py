@@ -422,6 +422,59 @@ def test_command_keyboard_interrupt_ends_agent_run_with_complete_logs(
     ]
 
 
+def test_command_execution_failure_logs_content_safe_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    command = "printf command-secret"
+    failure_text = "runner-error-secret"
+    client = FakeResponsesClient([ModelResponse([FunctionCall(f'{{"command":"{command}"}}')], "")])
+
+    with (
+        caplog.at_level(logging.INFO, logger="azure_bash_agent.agent"),
+        pytest.raises(RuntimeError, match=failure_text),
+    ):
+        AgentRun(
+            "deployment",
+            client,
+            FakeRunner([RuntimeError(failure_text)]),
+            FakeTerminal(["request", "yes"]),
+        ).run()
+
+    assert "event=bash_command_execution_failed operator_turn=1 model_turn=1 command=1" in [
+        record.getMessage() for record in caplog.records
+    ]
+    assert command not in caplog.text
+    assert failure_text not in caplog.text
+
+
+def test_command_execution_status_is_redacted_in_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    unsafe_status = "unexpected-sensitive-status"
+    client = FakeResponsesClient(
+        [
+            ModelResponse([FunctionCall('{"command":"x"}')], ""),
+            ModelResponse([], "done"),
+        ]
+    )
+    result = CommandResult(unsafe_status, None, "", False, False)
+
+    with caplog.at_level(logging.INFO, logger="azure_bash_agent.agent"):
+        AgentRun(
+            "deployment",
+            client,
+            FakeRunner([result]),
+            FakeTerminal(["request", "yes"]),
+        ).run()
+
+    assert (
+        "event=bash_command_execution_completed "
+        "operator_turn=1 model_turn=1 command=1 status=unknown"
+        in [record.getMessage() for record in caplog.records]
+    )
+    assert unsafe_status not in caplog.text
+
+
 def test_approval_cancellation_logs_operator_turn_before_exit(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
