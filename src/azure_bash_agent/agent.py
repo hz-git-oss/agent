@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from azure_bash_agent.bash_runner import CommandResult, CommandRunner
 
 DEFAULT_INSTRUCTIONS = (
-    "You have one Bash tool. Use it only when necessary to complete the operator's task; "
+    "You have one Bash tool. Use it only when necessary to complete the operator's request; "
     "otherwise answer directly."
 )
 
@@ -27,6 +28,7 @@ BASH_TOOL: dict[str, object] = {
 }
 
 _NO_OUTPUT_NOTICE = "Model returned no output."
+_LOGGER = logging.getLogger(__name__)
 
 
 class AgentProtocolError(RuntimeError):
@@ -74,7 +76,7 @@ class _FunctionCall:
 
 
 class AgentRun:
-    """Coordinate one task through zero or more Tool Rounds."""
+    """Coordinate a continuous Agent Run through zero or more Operator Turns."""
 
     def __init__(
         self,
@@ -89,13 +91,46 @@ class AgentRun:
         self._terminal = terminal
 
     def run(self) -> None:
-        """Run until final model output or clean operator cancellation."""
-        task = self._read_task()
-        if task is None:
-            return
-        history: list[object] = [{"role": "user", "content": task}]
+        """Run Operator Turns until clean operator cancellation."""
+        history: list[object] = []
+        completed_turns = 0
+        _LOGGER.info("event=agent_run_started")
 
         while True:
+            operator_request = self._read_operator_request()
+            if operator_request is None:
+                _LOGGER.info(
+                    "event=agent_run_exited reason=operator_exit completed_turns=%d",
+                    completed_turns,
+                )
+                return
+            operator_turn = completed_turns + 1
+            _LOGGER.info("event=operator_turn_started operator_turn=%d", operator_turn)
+            candidate_history = [*history, {"role": "user", "content": operator_request}]
+            model_turns = self._run_operator_turn(candidate_history, operator_turn)
+            if model_turns is None:
+                _LOGGER.info(
+                    "event=agent_run_exited reason=operator_exit completed_turns=%d",
+                    completed_turns,
+                )
+                return
+            history = candidate_history
+            completed_turns += 1
+            _LOGGER.info(
+                "event=operator_turn_completed operator_turn=%d model_turns=%d",
+                operator_turn,
+                model_turns,
+            )
+
+    def _run_operator_turn(self, history: list[object], operator_turn: int) -> int | None:
+        model_turn = 0
+        while True:
+            model_turn += 1
+            _LOGGER.info(
+                "event=model_request_started operator_turn=%d model_turn=%d",
+                operator_turn,
+                model_turn,
+            )
             response = self._responses_client.create(
                 model=self._model,
                 input=list(history),
@@ -105,11 +140,18 @@ class AgentRun:
             )
             history.extend(response.output)
             calls = self._function_calls(response.output)
+            _LOGGER.info(
+                "event=model_request_completed operator_turn=%d model_turn=%d "
+                "output_items=%d tool_calls=%d",
+                operator_turn,
+                model_turn,
+                len(response.output),
+                len(calls),
+            )
             if not calls:
-                self._terminal.write(
-                    response.output_text if response.output_text.strip() else _NO_OUTPUT_NOTICE
-                )
-                return
+                text = response.output_text if response.output_text.strip() else _NO_OUTPUT_NOTICE
+                self._terminal.write(f"Assistant: {text}")
+                return model_turn
 
             results: list[object] = []
             for call in calls:
@@ -126,7 +168,12 @@ class AgentRun:
                 else:
                     approval = self._read_approval(command)
                     if approval is None:
-                        return
+                        _LOGGER.info(
+                            "event=operator_turn_cancelled operator_turn=%d model_turns=%d",
+                            operator_turn,
+                            model_turn,
+                        )
+                        return None
                     if approval:
                         result = self._command_runner.run(command)
                     else:
@@ -147,17 +194,17 @@ class AgentRun:
                 )
             history.extend(results)
 
-    def _read_task(self) -> str | None:
+    def _read_operator_request(self) -> str | None:
         while True:
-            answer = self._prompt("Task: ")
-            if answer is None or answer.strip().casefold() == "exit":
+            answer = self._prompt("You: ")
+            if answer is None or answer.strip().casefold() in {"exit", "quit"}:
                 return None
             if answer.strip():
                 return answer
 
     def _read_approval(self, command: str) -> bool | None:
         answer = self._prompt(f"Run {command!a}? [y/N]: ")
-        if answer is None or answer.strip().casefold() == "exit":
+        if answer is None or answer.strip().casefold() in {"exit", "quit"}:
             return None
         return answer.strip().casefold() in {"y", "yes"}
 

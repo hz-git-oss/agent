@@ -1,12 +1,16 @@
 # Bash Agent
 
-This context describes one task-oriented conversation in which an operator can approve model-requested shell commands.
+This context describes one continuous terminal conversation in which an operator can submit multiple requests and approve model-requested shell commands.
 
 ## Language
 
 **Agent Run**:
-A conversation that starts with one operator task and ends when the model requests no tool, or when the operator cancels it.
+One continuous conversation from startup until the operator exits or cancels. It contains zero or more Operator Turns and keeps completed history in memory.
 _Avoid_: Session, chat
+
+**Operator Turn**:
+One nonblank operator request and the resulting Model Turns and Tool Rounds, ending when the model returns a final response.
+_Avoid_: Task, user turn
 
 **Model Turn**:
 One model response within an Agent Run.

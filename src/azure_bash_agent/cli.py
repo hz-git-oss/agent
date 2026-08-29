@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import Never, TextIO
@@ -86,7 +87,7 @@ def main(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
-    """Run one configured task and return a process exit code."""
+    """Run one configured Agent Run and return a process exit code."""
     input_stream = sys.stdin if stdin is None else stdin
     output_stream = sys.stdout if stdout is None else stdout
     error_stream = sys.stderr if stderr is None else stderr
@@ -110,7 +111,7 @@ def main(
             command_runner,
             terminal,
         )
-        agent_run.run()
+        _run_with_logging(agent_run, error_stream)
     except ConfigError as error:
         _write_error(error_stream, f"Configuration error: {_summary(error)}")
         return 2
@@ -134,6 +135,23 @@ def main(
     except KeyboardInterrupt:
         return 0
     return 0
+
+
+def _run_with_logging(agent_run: AgentRun, stream: TextIO) -> None:
+    logger = logging.getLogger("azure_bash_agent")
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    previous_level = logger.level
+    previous_propagate = logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    try:
+        agent_run.run()
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+        logger.propagate = previous_propagate
 
 
 def _summary(error: BaseException) -> str:
