@@ -155,6 +155,13 @@ class AgentRun:
                     len(response.output),
                     len(calls),
                 )
+                if calls:
+                    _LOGGER.info(
+                        "event=bash_tool_requested operator_turn=%d model_turn=%d commands=%d",
+                        operator_turn,
+                        model_turn,
+                        len(calls),
+                    )
                 if not calls:
                     text = (
                         response.output_text if response.output_text.strip() else _NO_OUTPUT_NOTICE
@@ -163,7 +170,7 @@ class AgentRun:
                     return model_turn
 
                 results: list[object] = []
-                for call in calls:
+                for command_number, call in enumerate(calls, start=1):
                     command = _parse_command(call.arguments)
                     if command is None:
                         result = CommandResult(
@@ -184,7 +191,32 @@ class AgentRun:
                             )
                             return None
                         if approval:
-                            result = self._command_runner.run(command)
+                            _LOGGER.info(
+                                "event=bash_command_execution_started operator_turn=%d "
+                                "model_turn=%d command=%d",
+                                operator_turn,
+                                model_turn,
+                                command_number,
+                            )
+                            try:
+                                result = self._command_runner.run(command)
+                            except Exception:
+                                _LOGGER.info(
+                                    "event=bash_command_execution_failed operator_turn=%d "
+                                    "model_turn=%d command=%d",
+                                    operator_turn,
+                                    model_turn,
+                                    command_number,
+                                )
+                                raise
+                            _LOGGER.info(
+                                "event=bash_command_execution_completed operator_turn=%d "
+                                "model_turn=%d command=%d status=%s",
+                                operator_turn,
+                                model_turn,
+                                command_number,
+                                _safe_result_status(result.status),
+                            )
                         else:
                             result = CommandResult(
                                 status="denied",
@@ -252,6 +284,11 @@ class AgentRun:
                 )
             )
         return calls
+
+
+def _safe_result_status(status: str) -> str:
+    safe_statuses = {"completed", "timed_out", "invalid_request", "execution_error"}
+    return status if status in safe_statuses else "unknown"
 
 
 def _parse_command(arguments: object) -> str | None:

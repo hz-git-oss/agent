@@ -175,12 +175,18 @@ def test_successful_turn_logs_content_safe_lifecycles(
         ).run()
 
     records = [record for record in caplog.records if record.name == "azure_bash_agent.agent"]
-    assert [record.levelname for record in records] == ["INFO"] * 8
+    assert [record.levelname for record in records] == ["INFO"] * 11
     assert [record.getMessage() for record in records] == [
         "event=agent_run_started",
         "event=operator_turn_started operator_turn=1",
         "event=model_request_started operator_turn=1 model_turn=1",
         ("event=model_request_completed operator_turn=1 model_turn=1 output_items=1 tool_calls=1"),
+        "event=bash_tool_requested operator_turn=1 model_turn=1 commands=1",
+        ("event=bash_command_execution_started operator_turn=1 model_turn=1 command=1"),
+        (
+            "event=bash_command_execution_completed "
+            "operator_turn=1 model_turn=1 command=1 status=completed"
+        ),
         "event=model_request_started operator_turn=1 model_turn=2",
         ("event=model_request_completed operator_turn=1 model_turn=2 output_items=1 tool_calls=0"),
         "event=operator_turn_completed operator_turn=1 model_turns=2",
@@ -409,6 +415,8 @@ def test_command_keyboard_interrupt_ends_agent_run_with_complete_logs(
         "event=operator_turn_started operator_turn=1",
         "event=model_request_started operator_turn=1 model_turn=1",
         "event=model_request_completed operator_turn=1 model_turn=1 output_items=1 tool_calls=1",
+        "event=bash_tool_requested operator_turn=1 model_turn=1 commands=1",
+        ("event=bash_command_execution_started operator_turn=1 model_turn=1 command=1"),
         "event=operator_turn_cancelled operator_turn=1 model_turns=1",
         "event=agent_run_exited reason=operator_exit completed_turns=0",
     ]
@@ -432,6 +440,7 @@ def test_approval_cancellation_logs_operator_turn_before_exit(
         "event=operator_turn_started operator_turn=1",
         "event=model_request_started operator_turn=1 model_turn=1",
         ("event=model_request_completed operator_turn=1 model_turn=1 output_items=1 tool_calls=1"),
+        "event=bash_tool_requested operator_turn=1 model_turn=1 commands=1",
         "event=operator_turn_cancelled operator_turn=1 model_turns=1",
         "event=agent_run_exited reason=operator_exit completed_turns=0",
     ]

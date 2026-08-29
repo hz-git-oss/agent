@@ -136,6 +136,13 @@ Windows uses `taskkill /T /F` when available. Cleanup is not hardened containmen
 
 ## Development checks
 
+The test suite includes a deterministic end-to-end scenario at the in-process CLI boundary.
+It loads a temporary TOML configuration, uses production terminal adaptation and Agent Run
+orchestration, and executes an approved harmless command through the real Bash runner. Only
+the external Responses client is replaced with a scripted mock LLM, so the scenario requires
+neither Azure authentication nor network access. It skips with an explicit reason when Bash
+is unavailable.
+
 ```powershell
 uv run pytest
 uv run ruff format --check .
