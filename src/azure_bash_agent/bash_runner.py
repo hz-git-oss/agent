@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 _WINDOWS = os.name == "nt"
+_CREATE_NEW_PROCESS_GROUP: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 _TERMINATION_GRACE_SECONDS = 1.0
 
 
@@ -78,7 +79,7 @@ class BashCommandRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=not _WINDOWS,
-                creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if _WINDOWS else 0),
+                creationflags=(_CREATE_NEW_PROCESS_GROUP if _WINDOWS else 0),
             )
         except OSError as error:
             return _error_result(f"could not start Bash: {_first_line(error)}")

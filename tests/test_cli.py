@@ -1,3 +1,4 @@
+import logging
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -245,6 +246,25 @@ def test_normal_agent_output_uses_stdout(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result == 0
     assert stdout.getvalue() == "final output\n"
     assert stderr.getvalue() == ""
+
+
+def test_application_info_logs_use_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_composition(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "create_agent_run",
+        lambda *args: SimpleNamespace(
+            run=lambda: logging.getLogger("azure_bash_agent.agent").info("event=agent_run_started")
+        ),
+    )
+    stdout = StringIO()
+    stderr = StringIO()
+
+    result = cli.main([], stdin=StringIO(), stdout=stdout, stderr=stderr)
+
+    assert result == 0
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == "INFO event=agent_run_started\n"
 
 
 def test_real_command_runner_factory_returns_configured_adapter(tmp_path: Path) -> None:
