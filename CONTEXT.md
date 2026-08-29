@@ -27,3 +27,14 @@ _Avoid_: Shell tool, terminal tool
 **Command Approval**:
 The operator's explicit consent to execute one command requested through the Bash Tool.
 _Avoid_: Confirmation, permission
+
+## Interaction
+
+An Agent Run repeatedly prompts with `You: ` for a nonblank operator request and labels the
+final response to each completed Operator Turn with `Assistant: `. Case-insensitive `exit`
+and `quit`, EOF, and keyboard interruption end the Agent Run without adding termination
+input to its history.
+
+Completed Operator Turns remain in process-local memory for later turns and are discarded
+when the Agent Run exits. Content-safe `INFO` events on stderr trace Agent Run, Operator
+Turn, and model-request lifecycles without recording conversation or command content.

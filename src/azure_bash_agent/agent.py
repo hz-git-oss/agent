@@ -99,21 +99,13 @@ class AgentRun:
         while True:
             operator_request = self._read_operator_request()
             if operator_request is None:
-                _LOGGER.info(
-                    "event=agent_run_exited reason=operator_exit completed_turns=%d",
-                    completed_turns,
-                )
-                return
+                break
             operator_turn = completed_turns + 1
             _LOGGER.info("event=operator_turn_started operator_turn=%d", operator_turn)
             candidate_history = [*history, {"role": "user", "content": operator_request}]
             model_turns = self._run_operator_turn(candidate_history, operator_turn)
             if model_turns is None:
-                _LOGGER.info(
-                    "event=agent_run_exited reason=operator_exit completed_turns=%d",
-                    completed_turns,
-                )
-                return
+                break
             history = candidate_history
             completed_turns += 1
             _LOGGER.info(
@@ -122,77 +114,101 @@ class AgentRun:
                 model_turns,
             )
 
-    def _run_operator_turn(self, history: list[object], operator_turn: int) -> int | None:
-        model_turn = 0
-        while True:
-            model_turn += 1
-            _LOGGER.info(
-                "event=model_request_started operator_turn=%d model_turn=%d",
-                operator_turn,
-                model_turn,
-            )
-            response = self._responses_client.create(
-                model=self._model,
-                input=list(history),
-                instructions=DEFAULT_INSTRUCTIONS,
-                tools=[BASH_TOOL],
-                store=False,
-            )
-            history.extend(response.output)
-            calls = self._function_calls(response.output)
-            _LOGGER.info(
-                "event=model_request_completed operator_turn=%d model_turn=%d "
-                "output_items=%d tool_calls=%d",
-                operator_turn,
-                model_turn,
-                len(response.output),
-                len(calls),
-            )
-            if not calls:
-                text = response.output_text if response.output_text.strip() else _NO_OUTPUT_NOTICE
-                self._terminal.write(f"Assistant: {text}")
-                return model_turn
+        _LOGGER.info(
+            "event=agent_run_exited reason=operator_exit completed_turns=%d",
+            completed_turns,
+        )
 
-            results: list[object] = []
-            for call in calls:
-                command = _parse_command(call.arguments)
-                if command is None:
-                    result = CommandResult(
-                        status="invalid_request",
-                        exit_code=None,
-                        output="",
-                        timed_out=False,
-                        truncated=False,
-                        reason="arguments must be exactly an object with one string command",
+    def _run_operator_turn(self, history: list[object], operator_turn: int) -> int | None:
+        completed_model_turns = 0
+        try:
+            while True:
+                model_turn = completed_model_turns + 1
+                _LOGGER.info(
+                    "event=model_request_started operator_turn=%d model_turn=%d",
+                    operator_turn,
+                    model_turn,
+                )
+                try:
+                    response = self._responses_client.create(
+                        model=self._model,
+                        input=list(history),
+                        instructions=DEFAULT_INSTRUCTIONS,
+                        tools=[BASH_TOOL],
+                        store=False,
                     )
-                else:
-                    approval = self._read_approval(command)
-                    if approval is None:
-                        _LOGGER.info(
-                            "event=operator_turn_cancelled operator_turn=%d model_turns=%d",
-                            operator_turn,
-                            model_turn,
-                        )
-                        return None
-                    if approval:
-                        result = self._command_runner.run(command)
-                    else:
+                except KeyboardInterrupt:
+                    _LOGGER.info(
+                        "event=model_request_cancelled operator_turn=%d model_turn=%d",
+                        operator_turn,
+                        model_turn,
+                    )
+                    raise
+                history.extend(response.output)
+                completed_model_turns += 1
+                calls = self._function_calls(response.output)
+                _LOGGER.info(
+                    "event=model_request_completed operator_turn=%d model_turn=%d "
+                    "output_items=%d tool_calls=%d",
+                    operator_turn,
+                    model_turn,
+                    len(response.output),
+                    len(calls),
+                )
+                if not calls:
+                    text = (
+                        response.output_text if response.output_text.strip() else _NO_OUTPUT_NOTICE
+                    )
+                    self._terminal.write(f"Assistant: {text}")
+                    return model_turn
+
+                results: list[object] = []
+                for call in calls:
+                    command = _parse_command(call.arguments)
+                    if command is None:
                         result = CommandResult(
-                            status="denied",
+                            status="invalid_request",
                             exit_code=None,
                             output="",
                             timed_out=False,
                             truncated=False,
-                            reason="command was not approved",
+                            reason="arguments must be exactly an object with one string command",
                         )
-                results.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": call.call_id,
-                        "output": result.to_json(),
-                    }
-                )
-            history.extend(results)
+                    else:
+                        approval = self._read_approval(command)
+                        if approval is None:
+                            _LOGGER.info(
+                                "event=operator_turn_cancelled operator_turn=%d model_turns=%d",
+                                operator_turn,
+                                model_turn,
+                            )
+                            return None
+                        if approval:
+                            result = self._command_runner.run(command)
+                        else:
+                            result = CommandResult(
+                                status="denied",
+                                exit_code=None,
+                                output="",
+                                timed_out=False,
+                                truncated=False,
+                                reason="command was not approved",
+                            )
+                    results.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call.call_id,
+                            "output": result.to_json(),
+                        }
+                    )
+                history.extend(results)
+        except KeyboardInterrupt:
+            _LOGGER.info(
+                "event=operator_turn_cancelled operator_turn=%d model_turns=%d",
+                operator_turn,
+                completed_model_turns,
+            )
+            return None
 
     def _read_operator_request(self) -> str | None:
         while True:
