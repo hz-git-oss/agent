@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 
 import pytest
+from openai import OpenAIError
 
 import azure_bash_agent.azure_client as azure_client
+from azure_bash_agent.agent import ModelRequestError
 from azure_bash_agent.config import LlmSettings
 
 
@@ -149,3 +151,36 @@ def test_adapter_calls_responses_create_and_retains_public_output_items(
             "store": False,
         }
     ]
+
+
+def test_adapter_translates_provider_request_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential = SimpleNamespace(get_token=lambda scope: None)
+
+    def create(**request: object) -> object:
+        raise OpenAIError("provider-secret")
+
+    monkeypatch.setattr(azure_client, "DefaultAzureCredential", lambda: credential)
+    monkeypatch.setattr(
+        azure_client,
+        "get_bearer_token_provider",
+        lambda value, scope: lambda: "token",
+    )
+    monkeypatch.setattr(
+        azure_client,
+        "OpenAI",
+        lambda **kwargs: SimpleNamespace(responses=SimpleNamespace(create=create)),
+    )
+    client = azure_client.create_responses_client(
+        LlmSettings("https://example.openai.azure.com/openai/v1/", "model", 30)
+    )
+
+    with pytest.raises(ModelRequestError, match="model request failed"):
+        client.create(
+            model="model",
+            input=[{"role": "user", "content": "task"}],
+            instructions="instructions",
+            tools=[],
+            store=False,
+        )

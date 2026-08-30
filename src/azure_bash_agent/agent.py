@@ -31,6 +31,10 @@ _NO_OUTPUT_NOTICE = "Model returned no output."
 _LOGGER = logging.getLogger(__name__)
 
 
+class ModelRequestError(RuntimeError):
+    """Raised when a model request fails recoverably."""
+
+
 class AgentProtocolError(RuntimeError):
     """Raised when a model response violates the configured tool protocol."""
 
@@ -93,6 +97,7 @@ class AgentRun:
     def run(self) -> None:
         """Run Operator Turns until clean operator cancellation."""
         history: list[object] = []
+        operator_turns = 0
         completed_turns = 0
         _LOGGER.info("event=agent_run_started")
 
@@ -100,10 +105,28 @@ class AgentRun:
             operator_request = self._read_operator_request()
             if operator_request is None:
                 break
-            operator_turn = completed_turns + 1
+            operator_turns += 1
+            operator_turn = operator_turns
             _LOGGER.info("event=operator_turn_started operator_turn=%d", operator_turn)
             candidate_history = [*history, {"role": "user", "content": operator_request}]
-            model_turns = self._run_operator_turn(candidate_history, operator_turn)
+            try:
+                model_turns = self._run_operator_turn(candidate_history, operator_turn)
+            except ModelRequestError:
+                self._terminal.write("Error: Model request failed; please try again.")
+                _LOGGER.info(
+                    "event=operator_turn_failed operator_turn=%d operation=model_request",
+                    operator_turn,
+                )
+                continue
+            except AgentProtocolError:
+                self._terminal.write(
+                    "Error: Model response violated the tool protocol; please try again."
+                )
+                _LOGGER.info(
+                    "event=operator_turn_failed operator_turn=%d operation=model_protocol",
+                    operator_turn,
+                )
+                continue
             if model_turns is None:
                 break
             history = candidate_history
@@ -140,6 +163,13 @@ class AgentRun:
                 except KeyboardInterrupt:
                     _LOGGER.info(
                         "event=model_request_cancelled operator_turn=%d model_turn=%d",
+                        operator_turn,
+                        model_turn,
+                    )
+                    raise
+                except ModelRequestError:
+                    _LOGGER.info(
+                        "event=model_request_failed operator_turn=%d model_turn=%d",
                         operator_turn,
                         model_turn,
                     )

@@ -93,6 +93,13 @@ Completed Operator Turns, including Model Turns and Tool Rounds, remain in memor
 sent with later requests so follow-up questions retain context. History is discarded when
 the process exits.
 
+If a model request fails or a model response violates the Bash Tool protocol, the terminal
+shows a concise error and prompts for another Operator Turn. The failed turn is removed from
+conversation history while every earlier completed turn remains available; failed requests
+are not retried automatically. This rollback affects only in-memory conversation history:
+any approved Bash commands that already ran may still have changed files or external systems.
+Startup, configuration, authentication, and unexpected programming failures remain terminal.
+
 When the model requests Bash, the exact command is shown in an escaped representation.
 Only `y` or `yes`, ignoring surrounding whitespace and case, approves it. Every other
 response denies that command and sends a structured denial back to the model. Each command
