@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -6,8 +7,8 @@ import pytest
 from azure_bash_agent.agent import (
     BASH_TOOL,
     DEFAULT_INSTRUCTIONS,
-    AgentProtocolError,
     AgentRun,
+    ModelRequestError,
     ModelResponse,
 )
 from azure_bash_agent.bash_runner import CommandResult
@@ -21,6 +22,8 @@ class FakeTerminal:
 
     def prompt(self, prompt: str) -> str:
         self.prompts.append(prompt)
+        if not self.answers:
+            raise EOFError
         answer = self.answers.pop(0)
         if isinstance(answer, BaseException):
             raise answer
@@ -33,34 +36,41 @@ class FakeTerminal:
 
 @dataclass
 class FakeResponsesClient:
-    responses: list[ModelResponse]
+    responses: list[ModelResponse | BaseException]
     requests: list[dict[str, Any]] = field(default_factory=list)
 
     def create(self, **kwargs: Any) -> ModelResponse:
         request = dict(kwargs)
         request["input"] = list(request["input"])
         self.requests.append(request)
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 @dataclass
 class FakeRunner:
-    results: list[CommandResult] = field(default_factory=list)
+    results: list[CommandResult | BaseException] = field(default_factory=list)
     commands: list[str] = field(default_factory=list)
 
     def run(self, command: str) -> CommandResult:
         self.commands.append(command)
-        return self.results.pop(0)
+        result = self.results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
 
-def test_no_tool_response_prints_final_text_and_ends_after_one_request() -> None:
+def test_no_tool_response_prints_labeled_final_text_and_prompts_again() -> None:
     terminal = FakeTerminal(["explain this repository"])
     client = FakeResponsesClient([ModelResponse(output=[], output_text="Final answer")])
     run = AgentRun("deployment", client, FakeRunner(), terminal)
 
     run.run()
 
-    assert terminal.output == ["Final answer"]
+    assert terminal.prompts == ["You: ", "You: "]
+    assert terminal.output == ["Assistant: Final answer"]
     assert len(client.requests) == 1
     assert client.requests[0]["input"] == [{"role": "user", "content": "explain this repository"}]
 
@@ -81,6 +91,170 @@ class OutputItem:
 
 def completed(output: str = "done", exit_code: int = 0) -> CommandResult:
     return CommandResult("completed", exit_code, output, False, False)
+
+
+def test_completed_operator_turns_continue_with_labels_and_history() -> None:
+    first_output = OutputItem("message", "first answer")
+    second_output = OutputItem("message", "second answer")
+    terminal = FakeTerminal(["first request", "   ", "follow up", "exit"])
+    client = FakeResponsesClient(
+        [
+            ModelResponse([first_output], "first answer"),
+            ModelResponse([second_output], "second answer"),
+        ]
+    )
+
+    AgentRun("deployment", client, FakeRunner(), terminal).run()
+
+    assert terminal.prompts == ["You: ", "You: ", "You: ", "You: "]
+    assert terminal.output == ["Assistant: first answer", "Assistant: second answer"]
+    assert client.requests[0]["input"] == [{"role": "user", "content": "first request"}]
+    assert client.requests[1]["input"] == [
+        {"role": "user", "content": "first request"},
+        first_output,
+        {"role": "user", "content": "follow up"},
+    ]
+
+
+def test_later_operator_turn_receives_completed_bash_tool_history() -> None:
+    call = FunctionCall('{"command":"printf ok"}')
+    first_final = OutputItem("message", "first answer")
+    second_final = OutputItem("message", "follow-up answer")
+    result = completed("ok")
+    client = FakeResponsesClient(
+        [
+            ModelResponse([call], "hidden"),
+            ModelResponse([first_final], "first answer"),
+            ModelResponse([second_final], "follow-up answer"),
+        ]
+    )
+
+    AgentRun(
+        "deployment",
+        client,
+        FakeRunner([result]),
+        FakeTerminal(["first request", "yes", "follow up", "exit"]),
+    ).run()
+
+    assert client.requests[2]["input"] == [
+        {"role": "user", "content": "first request"},
+        call,
+        {
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": result.to_json(),
+        },
+        first_final,
+        {"role": "user", "content": "follow up"},
+    ]
+
+
+def test_model_request_failure_discards_partial_turn_and_preserves_completed_history(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    completed_output = OutputItem("message", "completed answer")
+    failed_call = FunctionCall('{"command":"printf failed-turn"}', "failed-call")
+    recovered_output = OutputItem("message", "recovered answer")
+    failed_result = completed("failed-turn-output")
+    client = FakeResponsesClient(
+        [
+            ModelResponse([completed_output], "completed answer"),
+            ModelResponse([failed_call], "hidden failed text"),
+            ModelRequestError("provider-secret"),
+            ModelResponse([recovered_output], "recovered answer"),
+        ]
+    )
+    terminal = FakeTerminal(
+        ["completed request", "failed request", "yes", "recovery request", "exit"]
+    )
+
+    with caplog.at_level(logging.INFO, logger="azure_bash_agent.agent"):
+        AgentRun("deployment", client, FakeRunner([failed_result]), terminal).run()
+
+    assert terminal.output == [
+        "Assistant: completed answer",
+        "Error: Model request failed; please try again.",
+        "Assistant: recovered answer",
+    ]
+    assert client.requests[3]["input"] == [
+        {"role": "user", "content": "completed request"},
+        completed_output,
+        {"role": "user", "content": "recovery request"},
+    ]
+    log_messages = [record.getMessage() for record in caplog.records]
+    assert "event=model_request_failed operator_turn=2 model_turn=2" in log_messages
+    assert "event=operator_turn_failed operator_turn=2 operation=model_request" in log_messages
+    assert "event=operator_turn_started operator_turn=3" in log_messages
+    assert "event=agent_run_exited reason=operator_exit completed_turns=2" in log_messages
+    for sensitive_text in (
+        "completed request",
+        "failed request",
+        "recovery request",
+        "hidden failed text",
+        "printf failed-turn",
+        "failed-call",
+        "failed-turn-output",
+        "provider-secret",
+        "deployment",
+    ):
+        assert sensitive_text not in caplog.text
+
+
+def test_successful_turn_logs_content_safe_lifecycles(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    credential = "credential-secret"
+    operator_text = f"operator-secret {credential}"
+    model_text = "model-secret"
+    deployment = "deployment-secret"
+    command = "printf command-secret"
+    command_output = "command-output-secret"
+    call_id = "random-identifier-secret"
+    client = FakeResponsesClient(
+        [
+            ModelResponse([FunctionCall(f'{{"command":"{command}"}}', call_id)], "hidden-secret"),
+            ModelResponse([OutputItem("message", model_text)], model_text),
+        ]
+    )
+
+    with caplog.at_level(logging.INFO, logger="azure_bash_agent.agent"):
+        AgentRun(
+            deployment,
+            client,
+            FakeRunner([completed(command_output)]),
+            FakeTerminal([operator_text, "yes", "exit"]),
+        ).run()
+
+    records = [record for record in caplog.records if record.name == "azure_bash_agent.agent"]
+    assert [record.levelname for record in records] == ["INFO"] * 11
+    assert [record.getMessage() for record in records] == [
+        "event=agent_run_started",
+        "event=operator_turn_started operator_turn=1",
+        "event=model_request_started operator_turn=1 model_turn=1",
+        ("event=model_request_completed operator_turn=1 model_turn=1 output_items=1 tool_calls=1"),
+        "event=bash_tool_requested operator_turn=1 model_turn=1 commands=1",
+        ("event=bash_command_execution_started operator_turn=1 model_turn=1 command=1"),
+        (
+            "event=bash_command_execution_completed "
+            "operator_turn=1 model_turn=1 command=1 status=completed"
+        ),
+        "event=model_request_started operator_turn=1 model_turn=2",
+        ("event=model_request_completed operator_turn=1 model_turn=2 output_items=1 tool_calls=0"),
+        "event=operator_turn_completed operator_turn=1 model_turns=2",
+        "event=agent_run_exited reason=operator_exit completed_turns=1",
+    ]
+    log_text = caplog.text
+    for sensitive_text in (
+        credential,
+        operator_text,
+        model_text,
+        deployment,
+        command,
+        command_output,
+        call_id,
+        "hidden-secret",
+    ):
+        assert sensitive_text not in log_text
 
 
 def test_request_uses_exact_tool_contract_and_local_state_options() -> None:
@@ -119,20 +293,20 @@ def test_whitespace_only_model_output_prints_notice() -> None:
         terminal,
     ).run()
 
-    assert terminal.output == ["Model returned no output."]
+    assert terminal.output == ["Assistant: Model returned no output."]
 
 
-def test_blank_initial_task_reprompts() -> None:
+def test_blank_operator_request_reprompts() -> None:
     terminal = FakeTerminal(["   ", "task"])
     client = FakeResponsesClient([ModelResponse([], "answer")])
 
     AgentRun("deployment", client, FakeRunner(), terminal).run()
 
-    assert terminal.prompts == ["Task: ", "Task: "]
+    assert terminal.prompts == ["You: ", "You: ", "You: "]
     assert client.requests[0]["input"] == [{"role": "user", "content": "task"}]
 
 
-@pytest.mark.parametrize("answer", [" EXIT ", EOFError(), KeyboardInterrupt()])
+@pytest.mark.parametrize("answer", [" EXIT ", " qUiT ", EOFError(), KeyboardInterrupt()])
 def test_initial_cancellation_does_not_request_model(answer: object) -> None:
     client = FakeResponsesClient([])
 
@@ -153,7 +327,7 @@ def test_approved_bash_call_executes_and_returns_structured_output() -> None:
     AgentRun("deployment", client, runner, terminal).run()
 
     assert runner.commands == ["printf ok"]
-    assert terminal.output == ["finished"]
+    assert terminal.output == ["Assistant: finished"]
     tool_output = client.requests[1]["input"][-1]
     assert tool_output == {
         "type": "function_call_output",
@@ -175,7 +349,7 @@ def test_intermediate_model_text_is_suppressed() -> None:
 
     AgentRun("deployment", client, FakeRunner(), terminal).run()
 
-    assert terminal.output == ["final"]
+    assert terminal.output == ["Assistant: final"]
 
 
 def test_denial_skips_runner_and_returns_tool_result() -> None:
@@ -235,7 +409,7 @@ def test_nonzero_bash_result_continues_agent_run() -> None:
     assert '"exit_code": 4' in client.requests[1]["input"][-1]["output"]
 
 
-@pytest.mark.parametrize("answer", ["exit", EOFError(), KeyboardInterrupt()])
+@pytest.mark.parametrize("answer", ["exit", " QUIT ", EOFError(), KeyboardInterrupt()])
 def test_approval_cancellation_stops_without_followup(answer: object) -> None:
     client = FakeResponsesClient([ModelResponse([FunctionCall('{"command":"x"}')], "")])
     runner = FakeRunner()
@@ -244,6 +418,136 @@ def test_approval_cancellation_stops_without_followup(answer: object) -> None:
 
     assert runner.commands == []
     assert len(client.requests) == 1
+
+
+def test_model_request_keyboard_interrupt_ends_agent_run_with_complete_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = FakeResponsesClient([KeyboardInterrupt()])
+
+    with caplog.at_level(logging.INFO, logger="azure_bash_agent.agent"):
+        AgentRun(
+            "deployment",
+            client,
+            FakeRunner(),
+            FakeTerminal(["request"]),
+        ).run()
+
+    records = [record for record in caplog.records if record.name == "azure_bash_agent.agent"]
+    assert [record.getMessage() for record in records] == [
+        "event=agent_run_started",
+        "event=operator_turn_started operator_turn=1",
+        "event=model_request_started operator_turn=1 model_turn=1",
+        "event=model_request_cancelled operator_turn=1 model_turn=1",
+        "event=operator_turn_cancelled operator_turn=1 model_turns=0",
+        "event=agent_run_exited reason=operator_exit completed_turns=0",
+    ]
+
+
+def test_command_keyboard_interrupt_ends_agent_run_with_complete_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = FakeResponsesClient([ModelResponse([FunctionCall('{"command":"x"}')], "hidden")])
+    terminal = FakeTerminal(["request", "yes"])
+
+    with caplog.at_level(logging.INFO, logger="azure_bash_agent.agent"):
+        AgentRun(
+            "deployment",
+            client,
+            FakeRunner([KeyboardInterrupt()]),
+            terminal,
+        ).run()
+
+    assert len(client.requests) == 1
+    assert terminal.output == []
+    records = [record for record in caplog.records if record.name == "azure_bash_agent.agent"]
+    assert [record.getMessage() for record in records] == [
+        "event=agent_run_started",
+        "event=operator_turn_started operator_turn=1",
+        "event=model_request_started operator_turn=1 model_turn=1",
+        "event=model_request_completed operator_turn=1 model_turn=1 output_items=1 tool_calls=1",
+        "event=bash_tool_requested operator_turn=1 model_turn=1 commands=1",
+        ("event=bash_command_execution_started operator_turn=1 model_turn=1 command=1"),
+        "event=operator_turn_cancelled operator_turn=1 model_turns=1",
+        "event=agent_run_exited reason=operator_exit completed_turns=0",
+    ]
+
+
+def test_command_execution_failure_logs_content_safe_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    command = "printf command-secret"
+    failure_text = "runner-error-secret"
+    client = FakeResponsesClient([ModelResponse([FunctionCall(f'{{"command":"{command}"}}')], "")])
+
+    with (
+        caplog.at_level(logging.INFO, logger="azure_bash_agent.agent"),
+        pytest.raises(RuntimeError, match=failure_text),
+    ):
+        AgentRun(
+            "deployment",
+            client,
+            FakeRunner([RuntimeError(failure_text)]),
+            FakeTerminal(["request", "yes"]),
+        ).run()
+
+    assert "event=bash_command_execution_failed operator_turn=1 model_turn=1 command=1" in [
+        record.getMessage() for record in caplog.records
+    ]
+    assert command not in caplog.text
+    assert failure_text not in caplog.text
+
+
+def test_command_execution_status_is_redacted_in_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    unsafe_status = "unexpected-sensitive-status"
+    client = FakeResponsesClient(
+        [
+            ModelResponse([FunctionCall('{"command":"x"}')], ""),
+            ModelResponse([], "done"),
+        ]
+    )
+    result = CommandResult(unsafe_status, None, "", False, False)
+
+    with caplog.at_level(logging.INFO, logger="azure_bash_agent.agent"):
+        AgentRun(
+            "deployment",
+            client,
+            FakeRunner([result]),
+            FakeTerminal(["request", "yes"]),
+        ).run()
+
+    assert (
+        "event=bash_command_execution_completed "
+        "operator_turn=1 model_turn=1 command=1 status=unknown"
+        in [record.getMessage() for record in caplog.records]
+    )
+    assert unsafe_status not in caplog.text
+
+
+def test_approval_cancellation_logs_operator_turn_before_exit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = FakeResponsesClient([ModelResponse([FunctionCall('{"command":"x"}')], "")])
+
+    with caplog.at_level(logging.INFO, logger="azure_bash_agent.agent"):
+        AgentRun(
+            "deployment",
+            client,
+            FakeRunner(),
+            FakeTerminal(["request", "exit"]),
+        ).run()
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "event=agent_run_started",
+        "event=operator_turn_started operator_turn=1",
+        "event=model_request_started operator_turn=1 model_turn=1",
+        ("event=model_request_completed operator_turn=1 model_turn=1 output_items=1 tool_calls=1"),
+        "event=bash_tool_requested operator_turn=1 model_turn=1 commands=1",
+        "event=operator_turn_cancelled operator_turn=1 model_turns=1",
+        "event=agent_run_exited reason=operator_exit completed_turns=0",
+    ]
 
 
 def test_approval_display_is_safely_escaped_but_command_is_unchanged() -> None:
@@ -290,21 +594,50 @@ def test_malformed_arguments_recover_with_invalid_request(arguments: object) -> 
         FunctionCall("{}", call_id=None),
     ],
 )
-def test_protocol_errors_happen_before_any_command_side_effect(bad_call: FunctionCall) -> None:
+def test_protocol_errors_end_only_the_current_operator_turn(
+    bad_call: FunctionCall,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    completed_output = OutputItem("message", "completed answer")
     valid = FunctionCall('{"command":"must not run"}', "valid")
+    recovered_output = OutputItem("message", "recovered answer")
     runner = FakeRunner([completed()])
-    terminal = FakeTerminal(["task", "y"])
+    terminal = FakeTerminal(["completed request", "failed request", "recovery request", "exit"])
+    client = FakeResponsesClient(
+        [
+            ModelResponse([completed_output], "completed answer"),
+            ModelResponse([valid, bad_call], "sensitive malformed response"),
+            ModelResponse([recovered_output], "recovered answer"),
+        ]
+    )
 
-    with pytest.raises(AgentProtocolError):
-        AgentRun(
-            "deployment",
-            FakeResponsesClient([ModelResponse([valid, bad_call], "")]),
-            runner,
-            terminal,
-        ).run()
+    with caplog.at_level(logging.INFO, logger="azure_bash_agent.agent"):
+        AgentRun("deployment", client, runner, terminal).run()
 
     assert runner.commands == []
-    assert terminal.prompts == ["Task: "]
+    assert terminal.prompts == ["You: ", "You: ", "You: ", "You: "]
+    assert terminal.output == [
+        "Assistant: completed answer",
+        "Error: Model response violated the tool protocol; please try again.",
+        "Assistant: recovered answer",
+    ]
+    assert client.requests[2]["input"] == [
+        {"role": "user", "content": "completed request"},
+        completed_output,
+        {"role": "user", "content": "recovery request"},
+    ]
+    log_messages = [record.getMessage() for record in caplog.records]
+    assert "event=operator_turn_failed operator_turn=2 operation=model_protocol" in log_messages
+    assert "event=operator_turn_started operator_turn=3" in log_messages
+    for sensitive_text in (
+        "completed request",
+        "failed request",
+        "recovery request",
+        "must not run",
+        "sensitive malformed response",
+        "valid",
+    ):
+        assert sensitive_text not in caplog.text
 
 
 def test_two_tool_rounds_have_no_artificial_round_limit() -> None:

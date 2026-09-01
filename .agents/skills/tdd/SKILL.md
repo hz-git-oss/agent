@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions "red-green-refactor", or wants integration tests.
+description: Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions "red-green-refactor", or asks for unit or end-to-end tests.
 ---
 
 # Test-Driven Development
@@ -24,6 +24,15 @@ A **seam** is the public boundary you test at: the interface where you observe b
 Ask: "What's the public interface, and which seams should we test?"
 
 When the shape of that interface is itself in question (how deep the module is, where the seam belongs, what the interface should expose), call the Skill tool with "codebase-design" for the vocabulary. It is the shared source of the module, interface, depth, seam, adapter, leverage and locality terms, and it is a reference to consult, not a session to run.
+
+## Test scales
+
+Use two complementary scales:
+
+- A **unit test** targets one specific behavior through a narrow, stable, public function or method seam.
+- An **end-to-end test** drives a complete user-visible scenario through the outermost application interface, keeping local production components real and replacing only true external-system boundaries.
+
+Private methods and internal collaborator call sequences are not valid seams at either scale. Use unit tests for precise cases and end-to-end tests for representative whole scenarios; duplicate a behavior across both scales only when each test covers a distinct risk.
 
 ## Anti-patterns
 

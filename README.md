@@ -1,7 +1,8 @@
 # Azure Bash Agent
 
 A synchronous terminal agent that uses an Azure OpenAI Responses deployment and can
-request individually approved Bash commands. Each process handles one task.
+request individually approved Bash commands. Each process hosts one continuous Agent Run
+with multiple Operator Turns.
 
 ## Requirements and installation
 
@@ -83,11 +84,27 @@ uv run azure-bash-agent --config path\to\agent.toml
 The configuration file must be inside a Git repository. The process discovers the
 nearest ancestor whose `.git` entry is a directory or worktree metadata file.
 
-Enter one nonblank task. The process ends after the model returns a final response, or
-when `exit`, EOF, or `Ctrl+C` cancels interaction. When the model requests Bash, the exact
-command is shown in an escaped representation. Only `y` or `yes`, ignoring surrounding
-whitespace and case, approves it. Every other response denies that command and sends a
-structured denial back to the model.
+The process repeatedly prompts with `You: ` for an Operator Turn and labels each final
+model response `Assistant: `. Blank input is ignored. Enter `exit` or `quit`, ignoring
+surrounding whitespace and case, or use EOF or `Ctrl+C` to end the Agent Run cleanly;
+termination input is handled locally and is not sent to the model.
+
+Completed Operator Turns, including Model Turns and Tool Rounds, remain in memory and are
+sent with later requests so follow-up questions retain context. History is discarded when
+the process exits.
+
+If a model request fails or a model response violates the Bash Tool protocol, the terminal
+shows a concise error and prompts for another Operator Turn. The failed turn is removed from
+conversation history while every earlier completed turn remains available; failed requests
+are not retried automatically. This rollback affects only in-memory conversation history:
+any approved Bash commands that already ran may still have changed files or external systems.
+Startup, configuration, authentication, and unexpected programming failures remain terminal.
+
+When the model requests Bash, the exact command is shown in an escaped representation.
+Only `y` or `yes`, ignoring surrounding whitespace and case, approves it. Every other
+response denies that command and sends a structured denial back to the model. Each command
+requires separate Command Approval, and model text accompanying a Bash Tool request stays
+hidden.
 
 Each approved command starts a fresh process as:
 
@@ -99,12 +116,19 @@ Commands inherit the agent environment and start at the discovered Git root. She
 does not persist between commands, but filesystem changes do. A nonzero command exit is
 returned to the model as a normal completed result.
 
-## State and limits
+## State, tracing, and limits
 
-Response items and tool results are retained only in memory for the current Agent Run.
-Requests use `store=False` and do not use `previous_response_id`. This application does
-not write a transcript, but Azure service-side processing and retention remain governed
-by the policies of the selected Azure deployment.
+Response items and tool results from completed Operator Turns are retained only in memory
+for the current Agent Run. Requests use `store=False` and do not use
+`previous_response_id`. This application does not write a transcript, but Azure
+service-side processing and retention remain governed by the policies of the selected
+Azure deployment.
+
+Deterministic `INFO` events on stderr trace Agent Run, Operator Turn, model-request,
+Bash Tool request, and command-execution lifecycles using turn numbers, statuses, and counts.
+These operational traces omit prompts, model text, commands, command output, credentials,
+configuration values, random identifiers, and durations. Prompts and assistant responses
+remain on stdout.
 
 Combined stdout and stderr are decoded as UTF-8 with replacement. Output over
 `bash.max_output_chars` is reduced to approximately equal head and tail portions with an
@@ -119,6 +143,13 @@ Windows uses `taskkill /T /F` when available. Cleanup is not hardened containmen
 > network resources available to the process.
 
 ## Development checks
+
+The test suite includes a deterministic end-to-end scenario at the in-process CLI boundary.
+It loads a temporary TOML configuration, uses production terminal adaptation and Agent Run
+orchestration, and executes an approved harmless command through the real Bash runner. Only
+the external Responses client is replaced with a scripted mock LLM, so the scenario requires
+neither Azure authentication nor network access. It skips with an explicit reason when Bash
+is unavailable.
 
 ```powershell
 uv run pytest

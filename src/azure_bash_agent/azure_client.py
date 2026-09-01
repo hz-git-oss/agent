@@ -6,9 +6,9 @@ from collections.abc import Callable, Sequence
 from typing import Protocol, cast
 
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
-from azure_bash_agent.agent import ModelResponse, ResponsesClient
+from azure_bash_agent.agent import ModelRequestError, ModelResponse, ResponsesClient
 from azure_bash_agent.config import LlmSettings
 
 AZURE_SCOPE = "https://ai.azure.com/.default"
@@ -32,16 +32,19 @@ class _OpenAIResponsesClient:
         tools: list[dict[str, object]],
         store: bool,
     ) -> ModelResponse:
-        response = cast(
-            _SdkResponse,
-            self._create(
-                model=model,
-                input=input,
-                instructions=instructions,
-                tools=tools,
-                store=store,
-            ),
-        )
+        try:
+            response = cast(
+                _SdkResponse,
+                self._create(
+                    model=model,
+                    input=input,
+                    instructions=instructions,
+                    tools=tools,
+                    store=store,
+                ),
+            )
+        except OpenAIError:
+            raise ModelRequestError("model request failed") from None
         return ModelResponse(output=list(response.output), output_text=response.output_text)
 
 

@@ -2,7 +2,7 @@
 
 ## Good Tests
 
-**Integration-style**: Test through real interfaces, not mocks of internal parts.
+**Public-seam example**: Test observable behavior through a public interface, without mocks of internal parts.
 
 ```typescript
 // GOOD: Tests observable behavior
